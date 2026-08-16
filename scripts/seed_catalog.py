@@ -16,13 +16,16 @@ The catalog has two layers:
 
 Usage:
     python scripts/seed_catalog.py --offline --count 800
+    python scripts/seed_catalog.py --jamendo --count 800   # needs JAMENDO_CLIENT_ID
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +34,10 @@ DEFAULT_OUTPUT = REPO_ROOT / "data" / "catalog.json"
 
 # Seed defaults to the author's student ID so the catalog is reproducible.
 DEFAULT_SEED = 23016
+
+# Public Jamendo API. Docs: https://developer.jamendo.com/v3.0
+JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
+JAMENDO_PAGE_SIZE = 200  # maximum the endpoint accepts per request
 
 GENEROS = [
     "pop",
@@ -247,6 +254,153 @@ def generar_offline(count: int, seed: int) -> list[dict]:
     return pistas
 
 
+def cargar_client_id() -> str:
+    """Read JAMENDO_CLIENT_ID from the environment or from a local .env file.
+
+    A full dotenv library would be overkill here: the file only ever holds
+    KEY=VALUE lines.
+    """
+    client_id = os.environ.get("JAMENDO_CLIENT_ID", "").strip()
+    if client_id:
+        return client_id
+
+    env_file = REPO_ROOT / ".env"
+    if env_file.exists():
+        for linea in env_file.read_text(encoding="utf-8").splitlines():
+            linea = linea.strip()
+            if not linea or linea.startswith("#") or "=" not in linea:
+                continue
+            clave, _, valor = linea.partition("=")
+            if clave.strip() == "JAMENDO_CLIENT_ID":
+                return valor.strip().strip('"').strip("'")
+
+    raise SystemExit(
+        "JAMENDO_CLIENT_ID is not set. Copy .env.example to .env and add your "
+        "client_id from https://devportal.jamendo.com, or run with --offline."
+    )
+
+
+def mapear_tags(musicinfo: dict, rng: random.Random) -> tuple[str, str, bool]:
+    """Map Jamendo's tag structure onto our genre / mood / instrumental fields.
+
+    Jamendo returns free-form tags, so anything we do not recognise falls back
+    to a seeded random choice to keep every track fully described.
+    """
+    tags = musicinfo.get("tags", {}) or {}
+    generos_tag = [t.lower() for t in tags.get("genres", []) or []]
+    vartags = [t.lower() for t in tags.get("vartags", []) or []]
+
+    genero = next((g for g in generos_tag if g in GENEROS), None)
+    if genero is None:
+        # Common Jamendo genre names that do not match our vocabulary directly.
+        alias = {
+            "electronic": "electronica",
+            "hiphop": "hip_hop",
+            "classical": "clasica",
+            "lounge": "ambient",
+            "soundtrack": "cinematica",
+            "latin": "latina",
+        }
+        genero = next(
+            (alias[g] for g in generos_tag if g in alias), rng.choice(GENEROS)
+        )
+
+    mood_alias = {
+        "happy": "alegre",
+        "epic": "epico",
+        "sad": "melancolico",
+        "melancholic": "melancolico",
+        "relaxed": "relajado",
+        "calm": "relajado",
+        "dark": "oscuro",
+        "energetic": "energetico",
+        "inspiring": "inspirador",
+        "tense": "tenso",
+    }
+    mood = next(
+        (mood_alias[v] for v in vartags if v in mood_alias), rng.choice(MOODS)
+    )
+
+    instrumental = "instrumental" in vartags or musicinfo.get("vocalinstrumental") == "instrumental"
+
+    return genero, mood, instrumental
+
+
+def descargar_jamendo(count: int, client_id: str, seed: int) -> list[dict]:
+    """Page through the Jamendo API and build catalog entries from the results.
+
+    Only the *metadata* comes from Jamendo. The base fee and the rights status
+    are still generated locally from the seed, because that information is not
+    public for any platform.
+    """
+    try:
+        import requests  # imported here so --offline never needs the dependency
+    except ImportError:  # pragma: no cover - depends on the environment
+        raise SystemExit(
+            "The --jamendo mode needs the 'requests' package: pip install -r requirements.txt"
+        )
+
+    rng = random.Random(seed)
+    pistas: list[dict] = []
+    offset = 0
+
+    while len(pistas) < count:
+        faltantes = count - len(pistas)
+        parametros = {
+            "client_id": client_id,
+            "format": "json",
+            "limit": min(JAMENDO_PAGE_SIZE, faltantes),
+            "offset": offset,
+            "include": "musicinfo+licenses",
+            "audioformat": "mp32",
+            "order": "popularity_total",
+        }
+        print(f"  fetching offset={offset} ...", file=sys.stderr)
+        respuesta = requests.get(JAMENDO_API, params=parametros, timeout=30)
+        respuesta.raise_for_status()
+        cuerpo = respuesta.json()
+
+        cabecera = cuerpo.get("headers", {})
+        if cabecera.get("status") != "success":
+            raise SystemExit(f"Jamendo API error: {cabecera.get('error_message')}")
+
+        resultados = cuerpo.get("results", [])
+        if not resultados:
+            print(
+                f"  Jamendo returned no more results; stopping at {len(pistas)} tracks.",
+                file=sys.stderr,
+            )
+            break
+
+        for item in resultados:
+            duracion = int(item.get("duration") or 0)
+            if duracion <= 0:
+                continue
+            genero, mood, instrumental = mapear_tags(item.get("musicinfo", {}) or {}, rng)
+            popularidad = rng.randint(5, 99)
+            pistas.append(
+                completar_pista(
+                    {
+                        "titulo": item.get("name") or "Untitled",
+                        "artista": item.get("artist_name") or "Unknown artist",
+                        "duracion_seg": duracion,
+                        "genero": genero,
+                        "mood": mood,
+                        "instrumental": instrumental,
+                        "popularidad": popularidad,
+                        "licencia": item.get("license_ccurl") or "Creative Commons",
+                        "tarifa_base_usd": tarifa_base(duracion, popularidad),
+                        "estado_derechos": elegir_estado(rng),
+                    },
+                    len(pistas) + 1,
+                )
+            )
+
+        offset += len(resultados)
+
+    return pistas
+
+
 def escribir_catalogo(pistas: list[dict], fuente: str, seed: int, salida: Path) -> None:
     salida.parent.mkdir(parents=True, exist_ok=True)
     documento = {
@@ -272,10 +426,16 @@ def resumen(pistas: list[dict]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    modo = parser.add_mutually_exclusive_group()
+    modo.add_argument(
         "--offline",
         action="store_true",
         help="generate the catalog locally, without network access (default)",
+    )
+    modo.add_argument(
+        "--jamendo",
+        action="store_true",
+        help="pull real track metadata from the Jamendo API (needs JAMENDO_CLIENT_ID)",
     )
     parser.add_argument(
         "--count", type=int, default=800, help="number of tracks to generate"
@@ -288,8 +448,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    pistas = generar_offline(args.count, args.seed)
-    escribir_catalogo(pistas, "offline", args.seed, args.output)
+    if args.jamendo:
+        fuente = "jamendo"
+        pistas = descargar_jamendo(args.count, cargar_client_id(), args.seed)
+    else:
+        fuente = "offline"
+        pistas = generar_offline(args.count, args.seed)
+
+    escribir_catalogo(pistas, fuente, args.seed, args.output)
 
     print(f"Wrote {len(pistas)} tracks to {args.output}")
     print(f"Rights status distribution: {resumen(pistas)}")
