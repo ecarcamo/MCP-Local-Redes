@@ -1,0 +1,8 @@
+# The MCP server itself runs on the Python standard library only.
+# JSON-RPC 2.0 and the MCP message flow are implemented by hand (no MCP SDK).
+
+# Only needed by scripts/seed_catalog.py when pulling real metadata from Jamendo.
+requests>=2.31
+
+# Development / testing
+pytest>=8.0
