@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import pricing
+from . import contracts, pricing
 from .catalog import ESTADOS_DERECHOS
 from .errors import ErrorDeNegocio
 from .jsonrpc import INVALID_PARAMS, JsonRpcError
@@ -501,5 +501,137 @@ registrar(
             ],
         },
         handler=_calcular_costo_licencia,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: generar_contrato
+# ---------------------------------------------------------------------------
+
+
+def _generar_contrato(args: dict, sesion: Any) -> ResultadoTool:
+    pista = _buscar_pista_o_fallar(sesion, args["pista_id"])
+
+    # The clearance check is repeated here on purpose: a track could have been
+    # blocked between the quote and the signature, and issuing a licence over a
+    # disputed work is exactly the risk this server exists to prevent.
+    if not ESTADOS_DERECHOS[pista["estado_derechos"]]["licenciable"]:
+        raise ErrorDeNegocio(
+            "pista_bloqueada",
+            f"Cannot issue a contract for {pista['pista_id']}: "
+            f"{pista['detalle_derechos']}",
+            {"pista_id": pista["pista_id"], "estado": pista["estado_derechos"]},
+        )
+
+    cotizacion = contracts.validar_cotizacion(
+        sesion.cotizaciones, args["cotizacion_id"], args["pista_id"]
+    )
+    contrato = contracts.crear_contrato(cotizacion, pista, args["cliente"])
+    sesion.contratos[contrato["contrato_id"]] = contrato
+
+    alcance = contrato["alcance"]
+    lineas = [
+        f"Contract {contrato['contrato_id']} issued to {contrato['cliente']}",
+        f"  track      {pista['pista_id']} \"{pista['titulo']}\" by {pista['artista']}",
+        f"  scope      {alcance['tipo_uso']} · {alcance['territorio']} · "
+        f"exclusivity: {alcance['exclusividad']}",
+        f"  term       {contrato['vigencia']['descripcion']} "
+        f"(from {contrato['vigencia']['inicio']})",
+        f"  amount     USD {contrato['monto_usd']:.2f}",
+        "  restrictions:",
+    ]
+    lineas.extend(f"    - {clausula}" for clausula in contrato["restricciones"])
+    lineas.append(
+        f"  Register the deployment with registrar_uso using contract id "
+        f"{contrato['contrato_id']}."
+    )
+
+    return ResultadoTool(texto="\n".join(lineas), datos=contrato)
+
+
+registrar(
+    Tool(
+        name="generar_contrato",
+        title="Issue a licence contract",
+        description=(
+            "Turn an accepted quote into a licence agreement. Requires a "
+            "cotizacion_id produced by calcular_costo_licencia in this same "
+            "session; the quote must not have expired and must belong to the "
+            "same track. Returns the contract with its scope, term, amount and "
+            "restriction clauses, plus a contrato_id."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pista_id": {"type": "string", "description": "Track being licensed."},
+                "cliente": {
+                    "type": "string",
+                    "description": "Name of the licensee (person or company).",
+                },
+                "cotizacion_id": {
+                    "type": "string",
+                    "description": "Quote id returned by calcular_costo_licencia.",
+                },
+            },
+            "required": ["pista_id", "cliente", "cotizacion_id"],
+        },
+        handler=_generar_contrato,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: registrar_uso
+# ---------------------------------------------------------------------------
+
+
+def _registrar_uso(args: dict, sesion: Any) -> ResultadoTool:
+    contrato = contracts.validar_contrato(sesion.contratos, args["contrato_id"])
+    registro = contracts.registrar_uso(
+        contrato, args["plataforma"], args["url_proyecto"]
+    )
+
+    texto = (
+        f"Usage registered as {registro['registro_id']}.\n"
+        f"  contract   {registro['contrato_id']}\n"
+        f"  track      {registro['pista_id']} \"{registro['titulo']}\"\n"
+        f"  platform   {registro['plataforma']}\n"
+        f"  project    {registro['url_proyecto']}\n"
+        f"  filed at   {registro['registrado_en']}\n"
+        "  The record was written to the royalty and audit log."
+    )
+    return ResultadoTool(texto=texto, datos=registro)
+
+
+registrar(
+    Tool(
+        name="registrar_uso",
+        title="Register a usage",
+        description=(
+            "Register where a licensed track was actually deployed, for royalty "
+            "reporting and audit. Requires an active contrato_id issued by "
+            "generar_contrato in this session. The record is appended to the "
+            "platform's usage log."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "contrato_id": {
+                    "type": "string",
+                    "description": "Contract id returned by generar_contrato.",
+                },
+                "plataforma": {
+                    "type": "string",
+                    "description": "Where the track was published, e.g. Instagram, YouTube.",
+                },
+                "url_proyecto": {
+                    "type": "string",
+                    "description": "Public URL of the piece using the track.",
+                },
+            },
+            "required": ["contrato_id", "plataforma", "url_proyecto"],
+        },
+        handler=_registrar_uso,
     )
 )
