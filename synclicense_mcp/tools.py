@@ -12,9 +12,12 @@ hand for the same reason the protocol is: no external schema library.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from . import pricing
 from .catalog import ESTADOS_DERECHOS
 from .errors import ErrorDeNegocio
 from .jsonrpc import INVALID_PARAMS, JsonRpcError
@@ -375,5 +378,128 @@ registrar(
             "required": ["pista_id"],
         },
         handler=_verificar_clearance,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: calcular_costo_licencia
+# ---------------------------------------------------------------------------
+
+
+def _buscar_pista_o_fallar(sesion: Any, pista_id: str) -> dict:
+    """Fetch a track or raise the business error every tool shares."""
+    pista = sesion.catalogo.obtener(pista_id)
+    if pista is None:
+        raise ErrorDeNegocio(
+            "pista_inexistente",
+            f"There is no track with id '{pista_id}' in the catalog.",
+            {"pista_id": pista_id},
+        )
+    return pista
+
+
+def _calcular_costo_licencia(args: dict, sesion: Any) -> ResultadoTool:
+    pista = _buscar_pista_o_fallar(sesion, args["pista_id"])
+
+    alcance = {
+        "tipo_uso": args["tipo_uso"],
+        "territorio": args["territorio"],
+        "exclusividad": args["exclusividad"],
+        "duracion_meses": args["duracion_meses"],
+    }
+    # Raises ErrorDeNegocio when the track is blocked.
+    desglose = pricing.calcular(
+        pista,
+        alcance["tipo_uso"],
+        alcance["territorio"],
+        alcance["exclusividad"],
+        alcance["duracion_meses"],
+    )
+
+    emitida = datetime.now(timezone.utc)
+    valida_hasta = emitida + timedelta(days=pricing.VALIDEZ_COTIZACION_DIAS)
+    cotizacion_id = f"COT-{uuid.uuid4().hex[:10].upper()}"
+
+    cotizacion = {
+        "cotizacion_id": cotizacion_id,
+        "pista_id": pista["pista_id"],
+        "titulo": pista["titulo"],
+        "artista": pista["artista"],
+        "alcance": alcance,
+        "desglose": desglose,
+        "estado_derechos": pista["estado_derechos"],
+        "emitida_en": emitida.isoformat(timespec="seconds"),
+        "valida_hasta": valida_hasta.isoformat(timespec="seconds"),
+    }
+    # Held in the session so generar_contrato can validate it later. This is
+    # what makes the tools a chain instead of five independent lookups.
+    sesion.cotizaciones[cotizacion_id] = cotizacion
+
+    texto = (
+        pricing.explicar(desglose, pista, alcance)
+        + f"\n  quote id: {cotizacion_id} (valid until {cotizacion['valida_hasta']})"
+    )
+    if desglose["recargo_escrow_usd"]:
+        texto += (
+            "\n  Note: this track has samples pending clearance; part of the fee "
+            "is held in escrow."
+        )
+
+    return ResultadoTool(texto=texto, datos=cotizacion)
+
+
+registrar(
+    Tool(
+        name="calcular_costo_licencia",
+        title="Quote a licence",
+        description=(
+            "Price a track for a specific licensing scenario. The fee is not "
+            "fixed: it is the base fee multiplied by the type of use, the "
+            "territory, the exclusivity and the term, plus an escrow surcharge "
+            "when the track has samples pending clearance. Returns a full "
+            "breakdown and a cotizacion_id that generar_contrato requires."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pista_id": {
+                    "type": "string",
+                    "description": "Track id, e.g. TRK-00001.",
+                },
+                "tipo_uso": {
+                    "type": "string",
+                    "enum": sorted(pricing.MULT_TIPO_USO),
+                    "description": "Where the track will be placed.",
+                },
+                "territorio": {
+                    "type": "string",
+                    "enum": sorted(pricing.MULT_TERRITORIO),
+                    "description": "Territory the licence must cover.",
+                },
+                "exclusividad": {
+                    "type": "string",
+                    "enum": sorted(pricing.MULT_EXCLUSIVIDAD),
+                    "description": (
+                        "'no' = non-exclusive, 'sectorial' = exclusive within the "
+                        "client's industry, 'total' = fully exclusive."
+                    ),
+                },
+                "duracion_meses": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120,
+                    "description": "Licence term in months. Use 0 for a perpetual licence.",
+                },
+            },
+            "required": [
+                "pista_id",
+                "tipo_uso",
+                "territorio",
+                "exclusividad",
+                "duracion_meses",
+            ],
+        },
+        handler=_calcular_costo_licencia,
     )
 )
