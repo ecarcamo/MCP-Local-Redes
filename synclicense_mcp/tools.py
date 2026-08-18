@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .catalog import ESTADOS_DERECHOS
+from .errors import ErrorDeNegocio
 from .jsonrpc import INVALID_PARAMS, JsonRpcError
 
 @dataclass(frozen=True)
@@ -166,3 +168,212 @@ def ejecutar(nombre: str, argumentos: dict, sesion: Any) -> ResultadoTool:
         )
     validados = validar_argumentos(tool.input_schema, argumentos)
     return tool.handler(validados, sesion)
+
+
+# ---------------------------------------------------------------------------
+# Tool 1: buscar_pista
+# ---------------------------------------------------------------------------
+
+MOODS = [
+    "alegre",
+    "epico",
+    "melancolico",
+    "relajado",
+    "tenso",
+    "energetico",
+    "inspirador",
+    "oscuro",
+]
+
+GENEROS = [
+    "pop",
+    "rock",
+    "electronica",
+    "hip_hop",
+    "jazz",
+    "clasica",
+    "folk",
+    "ambient",
+    "cinematica",
+    "latina",
+]
+
+
+def _buscar_pista(args: dict, sesion: Any) -> ResultadoTool:
+    encontradas = sesion.catalogo.buscar(
+        mood=args["mood"],
+        genero=args["genero"],
+        instrumental=args["instrumental"],
+        duracion_seg_min=args["duracion_seg_min"],
+        duracion_seg_max=args["duracion_seg_max"],
+        presupuesto_max=args["presupuesto_max"],
+    )
+    limite = args["limite"]
+    seleccion = encontradas[:limite]
+
+    pistas = [
+        {
+            "pista_id": p["pista_id"],
+            "titulo": p["titulo"],
+            "artista": p["artista"],
+            "duracion_seg": p["duracion_seg"],
+            "genero": p["genero"],
+            "mood": p["mood"],
+            "instrumental": p["instrumental"],
+            "popularidad": p["popularidad"],
+            "tarifa_base_usd": p["tarifa_base_usd"],
+            "estado_derechos": p["estado_derechos"],
+        }
+        for p in seleccion
+    ]
+
+    if not pistas:
+        texto = (
+            "No tracks matched those criteria. Try widening the budget, the "
+            "duration range, or dropping the mood/genre filter."
+        )
+    else:
+        lineas = [
+            f"{len(encontradas)} track(s) matched; showing the top {len(pistas)}:"
+        ]
+        for p in pistas:
+            lineas.append(
+                f"  {p['pista_id']} · \"{p['titulo']}\" by {p['artista']} · "
+                f"{p['duracion_seg']}s · {p['genero']}/{p['mood']} · "
+                f"base USD {p['tarifa_base_usd']:.2f} · rights: {p['estado_derechos']}"
+            )
+        texto = "\n".join(lineas)
+
+    return ResultadoTool(
+        texto=texto,
+        datos={"total_encontradas": len(encontradas), "pistas": pistas},
+    )
+
+
+registrar(
+    Tool(
+        name="buscar_pista",
+        title="Search tracks",
+        description=(
+            "Search the licensing catalog by creative brief and budget. "
+            "Every filter is optional; combine them to narrow the shortlist. "
+            "Tracks blocked by an authorship dispute are excluded because they "
+            "cannot be licensed. Returns the most popular matches first."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "mood": {
+                    "type": "string",
+                    "enum": MOODS,
+                    "description": "Emotional character of the track.",
+                },
+                "genero": {
+                    "type": "string",
+                    "enum": GENEROS,
+                    "description": "Musical genre.",
+                },
+                "instrumental": {
+                    "type": "boolean",
+                    "description": "true to return only tracks without vocals.",
+                },
+                "duracion_seg_min": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Minimum duration in seconds.",
+                },
+                "duracion_seg_max": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum duration in seconds.",
+                },
+                "presupuesto_max": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Maximum base fee in USD before multipliers.",
+                },
+                "limite": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5,
+                    "description": "How many candidates to return.",
+                },
+            },
+            "required": [],
+        },
+        handler=_buscar_pista,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Tool 2: verificar_clearance
+# ---------------------------------------------------------------------------
+
+
+def _verificar_clearance(args: dict, sesion: Any) -> ResultadoTool:
+    pista_id = args["pista_id"]
+    pista = sesion.catalogo.obtener(pista_id)
+    if pista is None:
+        raise ErrorDeNegocio(
+            "pista_inexistente",
+            f"There is no track with id '{pista_id}' in the catalog.",
+            {"pista_id": pista_id},
+        )
+
+    estado = pista["estado_derechos"]
+    propiedades = ESTADOS_DERECHOS[estado]
+
+    datos = {
+        "pista_id": pista_id,
+        "titulo": pista["titulo"],
+        "artista": pista["artista"],
+        "estado": estado,
+        "licenciable": propiedades["licenciable"],
+        "detalle": pista["detalle_derechos"],
+        "restricciones": pista["restricciones"],
+        "recargo_escrow_pct": propiedades["recargo_escrow_pct"],
+        "licencia_origen": pista["licencia"],
+    }
+
+    veredicto = "CLEARED" if propiedades["licenciable"] else "NOT LICENSABLE"
+    lineas = [
+        f"{pista_id} \"{pista['titulo']}\" — {veredicto} (status: {estado})",
+        pista["detalle_derechos"],
+    ]
+    if propiedades["recargo_escrow_pct"]:
+        lineas.append(
+            f"An escrow surcharge of {propiedades['recargo_escrow_pct']:.0f}% "
+            "will be added to any quote for this track."
+        )
+    for restriccion in pista["restricciones"]:
+        lineas.append(f"  - {restriccion}")
+
+    return ResultadoTool(texto="\n".join(lineas), datos=datos)
+
+
+registrar(
+    Tool(
+        name="verificar_clearance",
+        title="Check rights clearance",
+        description=(
+            "Check the legal status of one track before quoting or licensing "
+            "it. Returns 'libre' (cleared), 'samples_pendientes' (licensable "
+            "but with a 15% escrow surcharge and a hold-back clause) or "
+            "'bloqueada' (frozen by an authorship dispute, not licensable). "
+            "Always run this before generating a contract."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pista_id": {
+                    "type": "string",
+                    "description": "Track id as returned by buscar_pista, e.g. TRK-00001.",
+                }
+            },
+            "required": ["pista_id"],
+        },
+        handler=_verificar_clearance,
+    )
+)

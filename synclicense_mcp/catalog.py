@@ -14,6 +14,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CATALOG_PATH = REPO_ROOT / "data" / "catalog.json"
 
 
+# Properties of each rights status. Kept next to the catalog because they are
+# a property of the track's legal state, not of any particular price rule.
+ESTADOS_DERECHOS = {
+    "libre": {"licenciable": True, "recargo_escrow_pct": 0.0},
+    "samples_pendientes": {"licenciable": True, "recargo_escrow_pct": 15.0},
+    "bloqueada": {"licenciable": False, "recargo_escrow_pct": 0.0},
+}
+
+
 class CatalogoNoEncontrado(RuntimeError):
     """Raised when the catalog file is missing, so the server can explain how to build it."""
 
