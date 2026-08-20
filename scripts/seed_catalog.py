@@ -271,8 +271,14 @@ def cargar_client_id() -> str:
             if not linea or linea.startswith("#") or "=" not in linea:
                 continue
             clave, _, valor = linea.partition("=")
-            if clave.strip() == "JAMENDO_CLIENT_ID":
-                return valor.strip().strip('"').strip("'")
+            if clave.strip() != "JAMENDO_CLIENT_ID":
+                continue
+            valor = valor.strip().strip('"').strip("'")
+            # An empty value means the file was copied from .env.example but
+            # never filled in, so fall through to the instructions below rather
+            # than sending an unauthenticated request to the API.
+            if valor:
+                return valor
 
     raise SystemExit(
         "JAMENDO_CLIENT_ID is not set. Copy .env.example to .env and add your "
