@@ -103,9 +103,10 @@ every command below is run from the project directory.
 
 ## 5. Building the catalog
 
-The repository already ships a generated catalog at `data/catalog.json`
-(800 tracks), so you can skip this section and go straight to
-[Usage](#6-usage). Rebuild it if you want a different size or a different seed.
+The repository already ships a catalog at `data/catalog.json` with **800 real
+tracks pulled from the Jamendo API**, so you can skip this section and go
+straight to [Usage](#6-usage). Rebuild it only if you want a different size, a
+different seed, or a catalog that needs no credentials.
 
 ### Offline mode (default, no credentials, no network)
 
@@ -113,7 +114,10 @@ The repository already ships a generated catalog at `data/catalog.json`
 python scripts/seed_catalog.py --offline --count 800
 ```
 
-Deterministic: the same `--seed` always produces the same catalog.
+Deterministic: the same `--seed` always produces the same catalog. It also pins
+three known tracks at the top (`TRK-00001` cleared, `TRK-00002` with pending
+samples, `TRK-00003` blocked), which makes the failure scenarios easy to
+demonstrate.
 
 ### Jamendo mode (real Creative Commons metadata)
 
@@ -126,6 +130,13 @@ cp .env.example .env
 python scripts/seed_catalog.py --jamendo --count 800
 ```
 
+Track metadata comes from the API; the base fee and the rights status are still
+generated locally (see [section 10](#10-where-the-data-comes-from)). Popularity
+is taken from the API's own `popularity_total` ordering. The free Jamendo plan
+throttles bursts of requests and answers a throttled page with an empty result
+list rather than an error, so the script pauses between pages and retries an
+empty page before concluding the catalog is exhausted.
+
 | Option | Default | Description |
 |---|---|---|
 | `--offline` / `--jamendo` | `--offline` | Source of the track metadata |
@@ -135,10 +146,10 @@ python scripts/seed_catalog.py --jamendo --count 800
 
 ## 6. Usage
 
-### 6.1 Run the guided demo (start here)
+### 6.1 Run the guided demo
 
-The fastest way to see the whole thing working. It spawns the server, runs the
-complete licensing conversation, and prints **every JSON-RPC message** that
+A scripted end-to-end run, useful as a smoke test. It spawns the server, plays
+the complete licensing conversation, and prints **every JSON-RPC message** that
 crosses the wire (`-->` sent, `<--` received):
 
 ```bash
@@ -156,22 +167,12 @@ Add `--quiet` to hide the raw protocol trace and see only the answers:
 python client/mcp_cli.py --demo --quiet
 ```
 
-### 6.2 Interactive session
+### 6.2 Interactive session (the main way to use it)
 
-A REPL to call any tool by hand:
+A REPL to drive the server by hand, one tool at a time:
 
 ```bash
 python client/mcp_cli.py --interactive
-```
-
-```
-mcp> list
-mcp> schema calcular_costo_licencia
-mcp> call buscar_pista {"mood": "epico", "genero": "cinematica", "presupuesto_max": 80}
-mcp> call verificar_clearance {"pista_id": "TRK-00001"}
-mcp> call calcular_costo_licencia {"pista_id": "TRK-00001", "tipo_uso": "tv_nacional", "territorio": "mundial", "exclusividad": "sectorial", "duracion_meses": 12}
-mcp> raw ping
-mcp> quit
 ```
 
 | Command | Description |
@@ -179,9 +180,38 @@ mcp> quit
 | `list` | Tools published by the server |
 | `schema <tool>` | JSON Schema of one tool |
 | `call <tool> <json>` | Call a tool with JSON arguments |
+| `vars` | Ids remembered from previous answers |
 | `ping` | Send a JSON-RPC ping |
 | `raw <method> [json]` | Send any JSON-RPC method by hand |
 | `quit` | Close the session |
+
+**Ids are remembered.** Every `*_id` a tool returns is stored and can be reused
+as `$name` in the next call, so a whole licensing negotiation can be typed
+without copying a single id by hand:
+
+```
+mcp> call buscar_pista {"mood": "epico", "instrumental": true, "presupuesto_max": 100, "limite": 3}
+   ...
+   remembered: $pista_id=TRK-00312
+
+mcp> call verificar_clearance {"pista_id": "$pista_id"}
+
+mcp> call calcular_costo_licencia {"pista_id": "$pista_id", "tipo_uso": "publicidad_online", "territorio": "latam", "exclusividad": "sectorial", "duracion_meses": 12}
+   ...
+   remembered: $cotizacion_id=COT-719E615733
+
+mcp> call generar_contrato {"pista_id": "$pista_id", "cliente": "Agencia Lumen S.A.", "cotizacion_id": "$cotizacion_id"}
+   ...
+   remembered: $contrato_id=CTR-F9D1D72B0D
+
+mcp> call registrar_uso {"contrato_id": "$contrato_id", "plataforma": "YouTube", "url_proyecto": "https://youtube.com/watch?v=demo"}
+
+mcp> vars
+mcp> quit
+```
+
+`$pista_id` defaults to the top candidate of the last search. Use `vars` at any
+point to see what is currently remembered.
 
 ### 6.3 Run the server on its own
 
@@ -251,22 +281,22 @@ Example request and response:
 ```json
 --> {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
       "name":"calcular_costo_licencia",
-      "arguments":{"pista_id":"TRK-00001","tipo_uso":"redes_sociales",
+      "arguments":{"pista_id":"TRK-00312","tipo_uso":"redes_sociales",
                    "territorio":"local","exclusividad":"no","duracion_meses":6}}}
 
 <-- {"jsonrpc":"2.0","id":5,"result":{
-      "content":[{"type":"text","text":"Quote for TRK-00001 \"Sunburst\" ... TOTAL USD 45.00"}],
+      "content":[{"type":"text","text":"Quote for TRK-00312 \"Stop!\" ... TOTAL USD 94.50"}],
       "structuredContent":{
         "ok":true,
         "cotizacion_id":"COT-3D18B1547D",
-        "pista_id":"TRK-00001",
+        "pista_id":"TRK-00312",
         "alcance":{"tipo_uso":"redes_sociales","territorio":"local",
                    "exclusividad":"no","duracion_meses":6},
-        "desglose":{"tarifa_base_usd":45.0,
+        "desglose":{"tarifa_base_usd":94.5,
                     "multiplicadores":{"tipo_uso":1.0,"territorio":1.0,
                                        "exclusividad":1.0,"vigencia":1.0},
-                    "subtotal_usd":45.0,"recargo_escrow_usd":0.0,
-                    "total_usd":45.0,"moneda":"USD"},
+                    "subtotal_usd":94.5,"recargo_escrow_usd":0.0,
+                    "total_usd":94.5,"moneda":"USD"},
         "valida_hasta":"2026-09-19T18:15:54+00:00"},
       "isError":false}}
 ```
@@ -349,10 +379,11 @@ A full specification is in [docs/SERVER_SPEC.md](docs/SERVER_SPEC.md).
 
 ## 10. Where the data comes from
 
-**Track metadata** (title, artist, duration, genre, mood, licence) comes from
-the public [Jamendo API](https://developer.jamendo.com/v3.0), which exposes a
-Creative Commons catalog. The offline generator produces the same shape locally
-so the project runs without credentials or network access.
+**Track metadata** (title, artist, duration, genre, mood, licence, popularity
+ranking) comes from the public [Jamendo API](https://developer.jamendo.com/v3.0),
+which exposes a Creative Commons catalog. The catalog shipped in this repository
+was built that way. The offline generator produces the same shape locally, so
+the project still runs with no credentials and no network access.
 
 **The business layer is simulated, on purpose.** No platform publishes its rate
 card or the internal legal status of each track, so `tarifa_base_usd` and
@@ -369,8 +400,11 @@ python -m pytest tests/ -v
 ```
 
 The suite covers the rate-card rules, the JSON-RPC framing, the handshake, the
-error codes, the tool chain and its refusals, and one end-to-end test that
-launches the real server process and speaks the stdio transport to it.
+error codes, the tool chain and its refusals, the seed generator, and one
+end-to-end test that launches the real server process and speaks the stdio
+transport to it. The tests look tracks up by rights status rather than by a
+fixed id, so they pass against any catalog: offline, Jamendo, or regenerated
+with a different seed.
 
 ## 12. Project layout
 
