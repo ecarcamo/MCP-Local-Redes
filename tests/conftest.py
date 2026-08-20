@@ -25,22 +25,44 @@ def catalogo() -> Catalogo:
     return cargar_catalogo()
 
 
+def _primera_con_estado(catalogo: Catalogo, estado: str) -> dict:
+    """First track in the catalog with a given rights status.
+
+    The fixtures look tracks up by status instead of by a fixed id so the suite
+    passes against any catalog: the offline seed, a Jamendo pull, or a catalog
+    regenerated with a different seed.
+    """
+    for pista in catalogo.pistas:
+        if pista["estado_derechos"] == estado:
+            return pista
+    pytest.skip(f"the catalog has no track with rights status '{estado}'")
+
+
 @pytest.fixture
 def pista_libre(catalogo: Catalogo) -> dict:
-    """TRK-00001 "Sunburst": pinned by the seed script as a cleared track."""
-    return catalogo.obtener("TRK-00001")
+    """A track cleared for synchronisation."""
+    return _primera_con_estado(catalogo, "libre")
 
 
 @pytest.fixture
 def pista_con_samples(catalogo: Catalogo) -> dict:
-    """TRK-00002: pinned as a track with samples pending clearance."""
-    return catalogo.obtener("TRK-00002")
+    """A track with samples still pending clearance."""
+    return _primera_con_estado(catalogo, "samples_pendientes")
 
 
 @pytest.fixture
 def pista_bloqueada(catalogo: Catalogo) -> dict:
-    """TRK-00003: pinned as a track frozen by an authorship dispute."""
-    return catalogo.obtener("TRK-00003")
+    """A track frozen by an authorship dispute."""
+    return _primera_con_estado(catalogo, "bloqueada")
+
+
+@pytest.fixture
+def otra_pista_libre(catalogo: Catalogo, pista_libre: dict) -> dict:
+    """A second cleared track, to test that a quote is bound to its own track."""
+    for pista in catalogo.pistas:
+        if pista["estado_derechos"] == "libre" and pista["pista_id"] != pista_libre["pista_id"]:
+            return pista
+    pytest.skip("the catalog needs at least two cleared tracks")
 
 
 @pytest.fixture

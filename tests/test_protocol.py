@@ -148,12 +148,12 @@ def test_falta_un_argumento_obligatorio(servidor):
     assert "pista_id" in respuesta["error"]["message"]
 
 
-def test_un_valor_fuera_del_enum_es_invalid_params(servidor):
+def test_un_valor_fuera_del_enum_es_invalid_params(servidor, pista_libre):
     respuesta = llamar(
         servidor,
         "calcular_costo_licencia",
         {
-            "pista_id": "TRK-00001",
+            "pista_id": pista_libre["pista_id"],
             "tipo_uso": "holograma",
             "territorio": "local",
             "exclusividad": "no",
@@ -184,12 +184,12 @@ def test_una_pista_inexistente_es_error_de_negocio_no_de_protocolo(servidor):
     assert respuesta["result"]["structuredContent"]["motivo"] == "pista_inexistente"
 
 
-def test_no_se_cotiza_una_pista_bloqueada(servidor):
+def test_no_se_cotiza_una_pista_bloqueada(servidor, pista_bloqueada):
     respuesta = llamar(
         servidor,
         "calcular_costo_licencia",
         {
-            "pista_id": "TRK-00003",
+            "pista_id": pista_bloqueada["pista_id"],
             "tipo_uso": "cine",
             "territorio": "mundial",
             "exclusividad": "total",
@@ -203,7 +203,7 @@ def test_no_se_cotiza_una_pista_bloqueada(servidor):
 # ----------------------------------------------------------- tool chaining
 
 
-def _cotizar(servidor, pista_id="TRK-00001"):
+def _cotizar(servidor, pista_id):
     return llamar(
         servidor,
         "calcular_costo_licencia",
@@ -217,16 +217,16 @@ def _cotizar(servidor, pista_id="TRK-00001"):
     )["result"]["structuredContent"]
 
 
-def test_flujo_completo_encadenado(servidor):
+def test_flujo_completo_encadenado(servidor, pista_libre):
     """Quote -> contract -> usage, each step consuming the previous id."""
-    cotizacion = _cotizar(servidor)
+    cotizacion = _cotizar(servidor, pista_libre["pista_id"])
     assert cotizacion["desglose"]["total_usd"] > 0
 
     contrato = llamar(
         servidor,
         "generar_contrato",
         {
-            "pista_id": "TRK-00001",
+            "pista_id": pista_libre["pista_id"],
             "cliente": "Agencia Lumen S.A.",
             "cotizacion_id": cotizacion["cotizacion_id"],
         },
@@ -247,23 +247,27 @@ def test_flujo_completo_encadenado(servidor):
     assert registro["contrato_id"] == contrato["contrato_id"]
 
 
-def test_no_hay_contrato_sin_cotizacion_valida(servidor):
+def test_no_hay_contrato_sin_cotizacion_valida(servidor, pista_libre):
     respuesta = llamar(
         servidor,
         "generar_contrato",
-        {"pista_id": "TRK-00001", "cliente": "X", "cotizacion_id": "COT-INVENTADA"},
+        {
+            "pista_id": pista_libre["pista_id"],
+            "cliente": "X",
+            "cotizacion_id": "COT-INVENTADA",
+        },
     )
     assert respuesta["result"]["isError"] is True
     assert respuesta["result"]["structuredContent"]["motivo"] == "cotizacion_inexistente"
 
 
-def test_la_cotizacion_debe_corresponder_a_la_pista(servidor):
-    cotizacion = _cotizar(servidor, "TRK-00001")
+def test_la_cotizacion_debe_corresponder_a_la_pista(servidor, pista_libre, otra_pista_libre):
+    cotizacion = _cotizar(servidor, pista_libre["pista_id"])
     respuesta = llamar(
         servidor,
         "generar_contrato",
         {
-            "pista_id": "TRK-00002",
+            "pista_id": otra_pista_libre["pista_id"],
             "cliente": "X",
             "cotizacion_id": cotizacion["cotizacion_id"],
         },
@@ -271,9 +275,9 @@ def test_la_cotizacion_debe_corresponder_a_la_pista(servidor):
     assert respuesta["result"]["structuredContent"]["motivo"] == "cotizacion_no_corresponde"
 
 
-def test_una_cotizacion_expirada_no_genera_contrato(servidor):
+def test_una_cotizacion_expirada_no_genera_contrato(servidor, pista_libre):
     """Quotes hold their price for 30 days; after that they must be redone."""
-    cotizacion = _cotizar(servidor)
+    cotizacion = _cotizar(servidor, pista_libre["pista_id"])
     servidor.sesion.cotizaciones[cotizacion["cotizacion_id"]]["valida_hasta"] = (
         "2020-01-01T00:00:00+00:00"
     )
@@ -281,7 +285,7 @@ def test_una_cotizacion_expirada_no_genera_contrato(servidor):
         servidor,
         "generar_contrato",
         {
-            "pista_id": "TRK-00001",
+            "pista_id": pista_libre["pista_id"],
             "cliente": "X",
             "cotizacion_id": cotizacion["cotizacion_id"],
         },
@@ -298,9 +302,9 @@ def test_no_se_registra_uso_sin_contrato(servidor):
     assert respuesta["result"]["structuredContent"]["motivo"] == "contrato_inexistente"
 
 
-def test_las_cotizaciones_no_se_comparten_entre_sesiones(catalogo, servidor):
+def test_las_cotizaciones_no_se_comparten_entre_sesiones(catalogo, servidor, pista_libre):
     """A second connection must not see the first one's quotes."""
-    cotizacion = _cotizar(servidor)
+    cotizacion = _cotizar(servidor, pista_libre["pista_id"])
     otro = Servidor(catalogo)
     request(otro, 1, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}})
     otro.manejar_mensaje({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -308,7 +312,7 @@ def test_las_cotizaciones_no_se_comparten_entre_sesiones(catalogo, servidor):
         otro,
         "generar_contrato",
         {
-            "pista_id": "TRK-00001",
+            "pista_id": pista_libre["pista_id"],
             "cliente": "X",
             "cotizacion_id": cotizacion["cotizacion_id"],
         },

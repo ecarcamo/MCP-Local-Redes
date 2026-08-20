@@ -8,13 +8,27 @@ from synclicense_mcp import pricing
 from synclicense_mcp.errors import ErrorDeNegocio
 
 
-def test_caso_de_referencia_de_la_propuesta(pista_libre):
+# A track with a known base fee, so the reference scenario can be asserted
+# exactly without depending on whichever catalog is currently installed.
+PISTA_DE_REFERENCIA = {
+    "pista_id": "TRK-TEST",
+    "titulo": "Reference Track",
+    "artista": "Test Artist",
+    "tarifa_base_usd": 45.0,
+    "estado_derechos": "libre",
+    "detalle_derechos": "Cleared.",
+}
+
+
+def test_caso_de_referencia_de_la_propuesta():
     """Social media, local, non-exclusive, six months is the reference scenario.
 
     Every multiplier is 1.0 there, so the total must equal the base fee. This
     is the USD 45 figure quoted in the approved project proposal.
     """
-    desglose = pricing.calcular(pista_libre, "redes_sociales", "local", "no", 6)
+    desglose = pricing.calcular(
+        PISTA_DE_REFERENCIA, "redes_sociales", "local", "no", 6
+    )
     assert desglose["total_usd"] == 45.00
     assert desglose["multiplicadores"] == {
         "tipo_uso": 1.0,
@@ -27,7 +41,8 @@ def test_caso_de_referencia_de_la_propuesta(pista_libre):
 def test_los_multiplicadores_se_componen(pista_libre):
     """The four dimensions multiply together rather than being applied apart."""
     desglose = pricing.calcular(pista_libre, "cine", "mundial", "total", 12)
-    esperado = 45.0 * 8.0 * 3.2 * 4.5 * 1.5
+    base = pista_libre["tarifa_base_usd"]
+    esperado = base * 8.0 * 3.2 * 4.5 * 1.5
     assert desglose["subtotal_usd"] == pytest.approx(round(esperado, 2))
 
 
