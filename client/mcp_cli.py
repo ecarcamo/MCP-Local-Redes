@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -168,6 +169,23 @@ def imprimir_resultado(respuesta: dict, colores: Colores) -> dict | None:
     return resultado.get("structuredContent")
 
 
+def pista_bloqueada_del_catalogo() -> str | None:
+    """Find the id of a blocked track by reading the catalog directly.
+
+    ``buscar_pista`` deliberately hides blocked tracks, so the failure scenario
+    below cannot discover one through the tools. The demo reads the catalog
+    file instead, which is fair: it is a test harness, not the assistant.
+    """
+    ruta = REPO_ROOT / "data" / "catalog.json"
+    if not ruta.exists():
+        return None
+    documento = json.loads(ruta.read_text(encoding="utf-8"))
+    for pista in documento.get("pistas", []):
+        if pista["estado_derechos"] == "bloqueada":
+            return pista["pista_id"]
+    return None
+
+
 def titulo(texto: str, colores: Colores) -> None:
     print()
     print(f"{colores.titulo}{'=' * 78}{colores.reset}")
@@ -196,8 +214,8 @@ def ejecutar_demo(cliente: ClienteMCP, colores: Colores) -> int:
         print(f"   {tool['name']:<26} {tool['title']}")
 
     titulo(
-        'STEP 2 - "I need an instrumental, upbeat 30-second track for an\n'
-        '          Instagram ad, budget $100." -> buscar_pista',
+        'STEP 2 - "I need an instrumental, epic track for a documentary\n'
+        '          trailer, budget $100." -> buscar_pista',
         c,
     )
     datos = imprimir_resultado(
@@ -205,8 +223,7 @@ def ejecutar_demo(cliente: ClienteMCP, colores: Colores) -> int:
             "buscar_pista",
             {
                 "instrumental": True,
-                "mood": "energetico",
-                "duracion_seg_max": 40,
+                "mood": "epico",
                 "presupuesto_max": 100,
                 "limite": 3,
             },
@@ -217,10 +234,8 @@ def ejecutar_demo(cliente: ClienteMCP, colores: Colores) -> int:
         print(f"{c.error}The demo needs at least one candidate track.{c.reset}")
         return 1
 
-    # The client picks "Sunburst" out of the shortlist, as in the proposal.
-    elegida = next(
-        (p for p in datos["pistas"] if p["titulo"] == "Sunburst"), datos["pistas"][0]
-    )
+    # The client picks the top candidate out of the shortlist.
+    elegida = datos["pistas"][0]
     pista_id = elegida["pista_id"]
     print(f"\n{c.tenue}   The client picks \"{elegida['titulo']}\" ({pista_id}).{c.reset}")
 
@@ -233,8 +248,8 @@ def ejecutar_demo(cliente: ClienteMCP, colores: Colores) -> int:
         return 1
 
     titulo(
-        'STEP 4 - "How much for social media, non-exclusive, six months?"\n'
-        "          -> calcular_costo_licencia",
+        'STEP 4 - "How much for social media, local, non-exclusive, six\n'
+        '          months?" -> calcular_costo_licencia',
         c,
     )
     cotizacion = imprimir_resultado(
@@ -284,32 +299,44 @@ def ejecutar_demo(cliente: ClienteMCP, colores: Colores) -> int:
     )
 
     titulo("STEP 7 - Business rules refusing invalid operations", c)
-    print(f"{c.tenue}   7a. Quoting a track frozen by an authorship dispute:{c.reset}")
-    imprimir_resultado(
-        cliente.llamar_tool(
-            "calcular_costo_licencia",
-            {
-                "pista_id": "TRK-00003",
-                "tipo_uso": "cine",
-                "territorio": "mundial",
-                "exclusividad": "total",
-                "duracion_meses": 0,
-            },
-        ),
-        c,
+    bloqueada = pista_bloqueada_del_catalogo()
+    if bloqueada:
+        print(
+            f"{c.tenue}   7a. Quoting {bloqueada}, a track frozen by an "
+            f"authorship dispute:{c.reset}"
+        )
+        imprimir_resultado(
+            cliente.llamar_tool(
+                "calcular_costo_licencia",
+                {
+                    "pista_id": bloqueada,
+                    "tipo_uso": "cine",
+                    "territorio": "mundial",
+                    "exclusividad": "total",
+                    "duracion_meses": 0,
+                },
+            ),
+            c,
+        )
+    otra = next(
+        (p["pista_id"] for p in datos["pistas"] if p["pista_id"] != pista_id), None
     )
-    print(f"\n{c.tenue}   7b. Issuing a contract from a quote for a different track:{c.reset}")
-    imprimir_resultado(
-        cliente.llamar_tool(
-            "generar_contrato",
-            {
-                "pista_id": "TRK-00002",
-                "cliente": "Agencia Lumen S.A.",
-                "cotizacion_id": cotizacion_id,
-            },
-        ),
-        c,
-    )
+    if otra:
+        print(
+            f"\n{c.tenue}   7b. Issuing a contract for {otra} using the quote "
+            f"that belongs to {pista_id}:{c.reset}"
+        )
+        imprimir_resultado(
+            cliente.llamar_tool(
+                "generar_contrato",
+                {
+                    "pista_id": otra,
+                    "cliente": "Agencia Lumen S.A.",
+                    "cotizacion_id": cotizacion_id,
+                },
+            ),
+            c,
+        )
     print(f"\n{c.tenue}   7c. Calling a tool with an invalid enum value "
           f"(protocol-level error, not a business one):{c.reset}")
     imprimir_resultado(
@@ -340,12 +367,69 @@ Commands:
   list                      show the tools published by the server
   schema <tool>             show the JSON Schema of one tool
   call <tool> <json-args>   call a tool, e.g.
-                            call verificar_clearance {"pista_id": "TRK-00001"}
+                            call verificar_clearance {"pista_id": "$pista_id"}
+  vars                      show the ids remembered from previous answers
   ping                      send a JSON-RPC ping
   raw <method> [json]       send any JSON-RPC method by hand
   help                      show this help
   quit                      close the session
+
+Ids returned by a tool are remembered and can be reused as $name, so a whole
+licensing flow can be typed without copying ids by hand:
+
+  call buscar_pista {"mood": "epico", "instrumental": true, "limite": 3}
+  call verificar_clearance {"pista_id": "$pista_id"}
+  call calcular_costo_licencia {"pista_id": "$pista_id", "tipo_uso": "redes_sociales",
+       "territorio": "local", "exclusividad": "no", "duracion_meses": 6}
+  call generar_contrato {"pista_id": "$pista_id", "cliente": "Agencia Lumen",
+       "cotizacion_id": "$cotizacion_id"}
+  call registrar_uso {"contrato_id": "$contrato_id", "plataforma": "Instagram",
+       "url_proyecto": "https://example.com/spot"}
 """
+
+# Matches the $name placeholders accepted in call arguments.
+PLACEHOLDER = re.compile(r"\$([a-zA-Z_][a-zA-Z0-9_]*)")
+
+
+def recordar_ids(datos: dict | None, memoria: dict[str, str]) -> list[str]:
+    """Remember the ids an answer carries, so the next call can reuse them.
+
+    Chaining is the point of this workflow, and typing a ten-character quote id
+    by hand during a live demo is where it falls apart. Returns the names that
+    were just learned, to show them to the user.
+    """
+    if not isinstance(datos, dict):
+        return []
+
+    nuevos = []
+    for clave, valor in datos.items():
+        if clave.endswith("_id") and isinstance(valor, str):
+            memoria[clave] = valor
+            nuevos.append(clave)
+
+    # buscar_pista returns a list; the top candidate is the useful default.
+    pistas = datos.get("pistas")
+    if isinstance(pistas, list) and pistas:
+        memoria["pista_id"] = pistas[0]["pista_id"]
+        nuevos.append("pista_id")
+
+    return nuevos
+
+
+def sustituir_placeholders(crudo: str, memoria: dict[str, str]) -> str:
+    """Replace every ``$name`` with the remembered value.
+
+    Raises:
+        KeyError: when the placeholder has not been learned yet.
+    """
+
+    def reemplazo(coincidencia: re.Match) -> str:
+        nombre = coincidencia.group(1)
+        if nombre not in memoria:
+            raise KeyError(nombre)
+        return memoria[nombre]
+
+    return PLACEHOLDER.sub(reemplazo, crudo)
 
 
 def ejecutar_interactivo(cliente: ClienteMCP, colores: Colores) -> int:
@@ -358,6 +442,7 @@ def ejecutar_interactivo(cliente: ClienteMCP, colores: Colores) -> int:
     print(AYUDA)
 
     tools = {t["name"]: t for t in cliente.listar_tools()}
+    memoria: dict[str, str] = {}
 
     while True:
         try:
@@ -389,6 +474,12 @@ def ejecutar_interactivo(cliente: ClienteMCP, colores: Colores) -> int:
                 continue
             print(json.dumps(tool["inputSchema"], indent=2, ensure_ascii=False))
             continue
+        if comando == "vars":
+            if not memoria:
+                print(f"  {c.tenue}nothing remembered yet; call a tool first.{c.reset}")
+            for nombre, valor in memoria.items():
+                print(f"  ${nombre:<16} {valor}")
+            continue
         if comando == "ping":
             cliente.enviar_request("ping")
             continue
@@ -400,11 +491,24 @@ def ejecutar_interactivo(cliente: ClienteMCP, colores: Colores) -> int:
             nombre = trozos[0]
             crudo = trozos[1].strip() if len(trozos) > 1 else "{}"
             try:
+                crudo = sustituir_placeholders(crudo, memoria)
+            except KeyError as exc:
+                print(
+                    f"{c.error}No value remembered for ${exc.args[0]}. "
+                    f"Run the tool that returns it first, or type 'vars'.{c.reset}"
+                )
+                continue
+            try:
                 argumentos = json.loads(crudo) if crudo else {}
             except json.JSONDecodeError as exc:
                 print(f"{c.error}Arguments must be valid JSON: {exc}{c.reset}")
                 continue
-            imprimir_resultado(cliente.llamar_tool(nombre, argumentos), c)
+
+            datos = imprimir_resultado(cliente.llamar_tool(nombre, argumentos), c)
+            aprendidos = recordar_ids(datos, memoria)
+            if aprendidos:
+                resumen = "  ".join(f"${n}={memoria[n]}" for n in aprendidos)
+                print(f"   {c.tenue}remembered: {resumen}{c.reset}")
             continue
         if comando == "raw":
             trozos = shlex.split(resto)
