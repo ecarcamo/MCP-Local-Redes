@@ -26,6 +26,7 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,13 @@ DEFAULT_SEED = 23016
 # Public Jamendo API. Docs: https://developer.jamendo.com/v3.0
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
 JAMENDO_PAGE_SIZE = 200  # maximum the endpoint accepts per request
+
+# The free Jamendo plan throttles bursts of requests. When it does, it answers
+# 200 OK with status "success" and an empty result list rather than an error,
+# so an empty page has to be retried with a growing pause before it can be
+# taken as the real end of the catalog.
+PAUSA_ENTRE_PAGINAS = 2.0
+REINTENTOS_POR_PAGINA = 4
 
 GENEROS = [
     "pop",
@@ -286,6 +294,20 @@ def cargar_client_id() -> str:
     )
 
 
+def popularidad_por_ranking(posicion: int, total: int) -> int:
+    """Turn a position in the popularity-ordered results into a 5-99 score.
+
+    The Jamendo query is ordered by ``popularity_total``, so the rank itself is
+    real information: position 0 is the most played track of the result set.
+    Using it beats drawing a random number, and it makes the base fee (which
+    depends on popularity) track something true about the catalog.
+    """
+    if total <= 1:
+        return 99
+    proporcion = posicion / (total - 1)
+    return int(round(99 - proporcion * 94))
+
+
 def mapear_tags(musicinfo: dict, rng: random.Random) -> tuple[str, str, bool]:
     """Map Jamendo's tag structure onto our genre / mood / instrumental fields.
 
@@ -347,15 +369,65 @@ def descargar_jamendo(count: int, client_id: str, seed: int) -> list[dict]:
         )
 
     rng = random.Random(seed)
-    pistas: list[dict] = []
+    crudas: list[dict] = []
     offset = 0
 
-    while len(pistas) < count:
-        faltantes = count - len(pistas)
+    while len(crudas) < count:
+        resultados = _pedir_pagina(requests, client_id, offset)
+        if resultados is None:
+            print(
+                f"  Jamendo returned no more results; stopping at {len(crudas)} tracks.",
+                file=sys.stderr,
+            )
+            break
+
+        crudas.extend(resultados)
+        offset += len(resultados)
+        if len(crudas) < count:
+            time.sleep(PAUSA_ENTRE_PAGINAS)
+
+    crudas = crudas[:count]
+
+    # Popularity depends on the position within the whole ordered result set,
+    # so the tracks are only converted once every page has been collected.
+    pistas: list[dict] = []
+    for posicion, item in enumerate(crudas):
+        duracion = int(item.get("duration") or 0)
+        if duracion <= 0:
+            continue
+        genero, mood, instrumental = mapear_tags(item.get("musicinfo", {}) or {}, rng)
+        popularidad = popularidad_por_ranking(posicion, len(crudas))
+        pistas.append(
+            completar_pista(
+                {
+                    "titulo": item.get("name") or "Untitled",
+                    "artista": item.get("artist_name") or "Unknown artist",
+                    "duracion_seg": duracion,
+                    "genero": genero,
+                    "mood": mood,
+                    "instrumental": instrumental,
+                    "popularidad": popularidad,
+                    "licencia": item.get("license_ccurl") or "Creative Commons",
+                    "tarifa_base_usd": tarifa_base(duracion, popularidad),
+                    "estado_derechos": elegir_estado(rng),
+                },
+                len(pistas) + 1,
+            )
+        )
+
+    return pistas
+
+
+def _pedir_pagina(requests, client_id: str, offset: int) -> list | None:
+    """Fetch one page, retrying when the API throttles us.
+
+    Returns the results, or ``None`` once the catalog is genuinely exhausted.
+    """
+    for intento in range(1, REINTENTOS_POR_PAGINA + 1):
         parametros = {
             "client_id": client_id,
             "format": "json",
-            "limit": min(JAMENDO_PAGE_SIZE, faltantes),
+            "limit": JAMENDO_PAGE_SIZE,
             "offset": offset,
             "include": "musicinfo+licenses",
             "audioformat": "mp32",
@@ -371,40 +443,18 @@ def descargar_jamendo(count: int, client_id: str, seed: int) -> list[dict]:
             raise SystemExit(f"Jamendo API error: {cabecera.get('error_message')}")
 
         resultados = cuerpo.get("results", [])
-        if not resultados:
+        if resultados:
+            return resultados
+
+        if intento < REINTENTOS_POR_PAGINA:
+            espera = PAUSA_ENTRE_PAGINAS * intento
             print(
-                f"  Jamendo returned no more results; stopping at {len(pistas)} tracks.",
+                f"  empty page (probably throttled), retrying in {espera:.0f}s ...",
                 file=sys.stderr,
             )
-            break
+            time.sleep(espera)
 
-        for item in resultados:
-            duracion = int(item.get("duration") or 0)
-            if duracion <= 0:
-                continue
-            genero, mood, instrumental = mapear_tags(item.get("musicinfo", {}) or {}, rng)
-            popularidad = rng.randint(5, 99)
-            pistas.append(
-                completar_pista(
-                    {
-                        "titulo": item.get("name") or "Untitled",
-                        "artista": item.get("artist_name") or "Unknown artist",
-                        "duracion_seg": duracion,
-                        "genero": genero,
-                        "mood": mood,
-                        "instrumental": instrumental,
-                        "popularidad": popularidad,
-                        "licencia": item.get("license_ccurl") or "Creative Commons",
-                        "tarifa_base_usd": tarifa_base(duracion, popularidad),
-                        "estado_derechos": elegir_estado(rng),
-                    },
-                    len(pistas) + 1,
-                )
-            )
-
-        offset += len(resultados)
-
-    return pistas
+    return None
 
 
 def escribir_catalogo(pistas: list[dict], fuente: str, seed: int, salida: Path) -> None:
